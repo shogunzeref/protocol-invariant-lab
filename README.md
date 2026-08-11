@@ -36,6 +36,43 @@ try to download a compiler binary the sandbox can't reach. `artifacts/`
 is already committed here so `npm install` + `npx hardhat test
 --no-compile` should work standalone once dependencies are installed.)
 
+`npm test` runs the same command. `npm run compile` regenerates
+`artifacts/`.
+
+## Phase 5: Pendle PT collateral in Morpho Blue
+
+Phase 5 is a different shape from the Moola phases: instead of a local
+Solidity stack, it reconstructs the *actual live* oracle architecture of
+66 Morpho Blue markets that use Pendle PT as collateral, and tests
+whether the PT/Morpho valuation mismatch is economically exploitable.
+
+Read-only throughout -- `eth_call`, `eth_blockNumber` and a public
+GraphQL indexer. No transaction, no position, no deployable exploit;
+the models are plain JavaScript with no on-chain counterpart.
+
+- `research/phase5-morpho-pendle.md` -- the main report (start here).
+- `research/morpho-pendle-market-map.md` -- per-market reconnaissance,
+  generated from the scan artifact.
+- `research/phase5-morpho-pendle-sources.md` -- provenance: repos,
+  commits, compiler versions, endpoints, and what could not be verified.
+- `models/` -- `pendle-amm.js` (a port of Pendle's `MarketMathCore`,
+  validated against 23 live oracle answers to <=3.6e-5),
+  `pendle-pt-valuation.js`, `morpho-market.js`, `pt-displacement-cost.js`,
+  `pt-recursive-leverage.js`, `phase5-scenarios.js`.
+- `scripts/phase5/` -- the read-only scanner, the experiment driver, and
+  the market-map renderer (`npm run phase5:scan`,
+  `npm run phase5:experiments`, `npm run phase5:market-map`).
+- `research/data/` -- generated artifacts. Regenerating the scan requires
+  network access; the experiments and the market map run offline from it.
+
+Headline result: the hypothesis is **not supported**. Morpho does
+transmit oracle price into borrow capacity with elasticity exactly 1, but
+a PT price cannot be pushed far enough to exploit it -- near maturity
+because a PT cannot be priced above par, and long-dated because Pendle's
+96% proportion cap binds first. See section 14 for the falsification of
+each hypothesis, and section 11 for the one concern that survives
+(liquidation depth relative to the PT's own Pendle pool).
+
 ## What each test file does
 
 - `test/oracle-manipulation.js` -- first pass. Uses a directly-settable
