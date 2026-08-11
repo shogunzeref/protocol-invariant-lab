@@ -34,10 +34,11 @@ describe("phase5: Pendle AMM port vs live on-chain state", () => {
 
       // The on-chain answer is a TWAP over `twapDuration` while the model value
       // is the rate implied by the last trade, so exact equality is not
-      // expected. 10 bps is far tighter than any economic effect examined here
-      // and still leaves room for the TWAP/spot gap in calm markets.
+      // expected. The observed residual is 3.6e-5, so 1e-4 leaves ~3x margin
+      // for the TWAP/spot gap while staying well below the basis-point effects
+      // this suite reasons about (see the unwind discounts in section 11).
       assert.ok(
-        relative < 1e-3,
+        relative < 1e-4,
         `${s.label}: modelled ${modelled} vs on-chain ${onChain} (relative ${relative})`
       );
       checked.push(relative);
