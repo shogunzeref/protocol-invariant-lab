@@ -1,136 +1,198 @@
-# moola-invariant-lab
+# protocol-invariant-lab
 
-Local-only research lab. No live protocol, no mainnet fork, no real funds,
-no flash loan, no atomic attacker contract anywhere in this repo. Built
-against a hand-copied, standalone-compiled subset of moola-v2's actual
-Aave-V2-fork contracts (LendingPool, ReserveLogic/ValidationLogic/
-GenericLogic, AToken/debt tokens, LendingPoolConfigurator), plus a
-minimal constant-product AMM and an AMM-sourced price oracle written for
-this lab (`contracts/lab/`).
+A research lab for testing **collateral-valuation invariants in DeFi lending
+protocols** — specifically, what happens to a lending market's solvency when the
+price it uses to value collateral can be moved by someone who is not privileged
+to move it.
 
-## Why the toolchain looks unusual
+The lab is organised as a sequence of phases, each one closing a gap in the
+previous one's argument. Phases 1–4 build a *local* Aave-V2-shaped lending stack
+(from moola-v2's actual contracts) and demonstrate the vulnerability class
+end-to-end against a real AMM-sourced oracle. Phase 5 turns the same questions on
+a *live* architecture — Pendle Principal Tokens used as collateral in Morpho Blue
+— and reaches the opposite conclusion, for reasons worth reading.
 
-- moola-v2's own dependencies are 2021-era (buidler/hardhat/waffle) and
-  don't resolve cleanly on modern Node -- this project uses a fresh
-  Hardhat 2.x + ethers v6 setup instead, with only the needed `.sol`
-  files copied in.
-- The sandbox this was built in can't reach `binaries.soliditylang.org`
-  or a live RPC node (network is allow-listed to package registries and
-  GitHub only), so compilation goes through the npm-distributed `solc`
-  package directly via `scripts/compile.js`, bypassing Hardhat's own
-  compiler downloader. This also means `LendingPool`'s external library
-  links (`ReserveLogic`, `ValidationLogic` -> `GenericLogic`) are resolved
-  by hand in `test/lib/deploy-stack.js::deployFrom`, since that linking
-  normally happens inside Hardhat's own compile pipeline.
+Two rules hold throughout:
+
+- **Nothing live is ever written to.** No transaction, no position, no mainnet
+  fork, no real funds. Phase 5's contact with mainnet is read-only `eth_call`.
+- **The attacker is never valued at their own manipulated price.** P&L and
+  protocol shortfall are always computed against an independent reference price.
+  Skipping this is the easiest way to manufacture a fake finding: the inflated
+  price ends up used as both the attack mechanism *and* the valuation basis, and
+  any position looks profitable.
+
+## Results so far
+
+| | Question | Answer |
+| --- | --- | --- |
+| **1** | If a collateral oracle lies, does borrow power follow? | Yes, 1:1 — but this assumes a privileged setter, so it proves nothing on its own. |
+| **2** | How much bad debt per unit of price displacement? | Quantified as a curve, not a single hand-picked multiplier. |
+| **3** | Can an *unprivileged* actor move borrow power with no settable oracle at all? | **Yes** — an ordinary swap against a thin constant-product pool does it. |
+| **4** | Does the attacker actually profit after unwinding, at independent prices? | Yes at some (liquidity, LTV, capital) points; a flash-loan overlay shows where financing is even repayable. |
+| **5** | Does the same reasoning break Pendle PT collateral in live Morpho Blue markets? | **No — falsified.** The mechanism is real, but the required price displacement is unreachable. |
+
+Phase 5's negative result is the more interesting one, and the reason it's
+negative is specific rather than reassuring: see
+[`research/phase5-morpho-pendle.md`](research/phase5-morpho-pendle.md).
 
 ## Setup
 
-```
+```sh
 npm install
-node scripts/compile.js      # writes artifacts/ from contracts/
-npx hardhat test --no-compile
+node scripts/compile.js        # writes artifacts/ from contracts/
+npm test                       # = hardhat test --no-compile  (74 tests)
 ```
 
-(`--no-compile` skips Hardhat's own compile task, which would otherwise
-try to download a compiler binary the sandbox can't reach. `artifacts/`
-is already committed here so `npm install` + `npx hardhat test
---no-compile` should work standalone once dependencies are installed.)
+`npm test` must stay on `--no-compile`: plain `hardhat test` tries to download a
+compiler binary from `binaries.soliditylang.org`, which this lab was built
+without access to. `artifacts/` is committed, so `npm install` + `npm test`
+works standalone.
 
-`npm test` runs the same command. `npm run compile` regenerates
-`artifacts/`.
+### Why the toolchain looks unusual
 
-## Phase 5: Pendle PT collateral in Morpho Blue
+- moola-v2's own dependencies are 2021-era (buidler/hardhat/waffle) and don't
+  resolve on modern Node, so this uses a fresh Hardhat 2.x + ethers v6 setup with
+  only the needed `.sol` files copied in.
+- Compilation goes through the npm-distributed `solc` package directly via
+  `scripts/compile.js`, bypassing Hardhat's compiler downloader. A consequence:
+  `LendingPool`'s external library links (`ReserveLogic`, `ValidationLogic` →
+  `GenericLogic`) are resolved by hand in
+  `test/lib/deploy-stack.js::deployFrom`, since that linking normally happens
+  inside Hardhat's compile pipeline.
 
-Phase 5 is a different shape from the Moola phases: instead of a local
-Solidity stack, it reconstructs the *actual live* oracle architecture of
-66 Morpho Blue markets that use Pendle PT as collateral, and tests
-whether the PT/Morpho valuation mismatch is economically exploitable.
+## Phases 1–4: AMM-derived collateral oracles (local Solidity)
 
-Read-only throughout -- `eth_call`, `eth_blockNumber` and a public
-GraphQL indexer. No transaction, no position, no deployable exploit;
-the models are plain JavaScript with no on-chain counterpart.
+Built against a hand-copied, standalone-compiled subset of moola-v2's actual
+Aave-V2-fork contracts (`LendingPool`, `ReserveLogic`/`ValidationLogic`/
+`GenericLogic`, `AToken`/debt tokens, `LendingPoolConfigurator`), plus a minimal
+constant-product AMM and an AMM-sourced oracle written for this lab
+(`contracts/lab/`).
 
-- `research/phase5-morpho-pendle.md` -- the main report (start here).
-- `research/morpho-pendle-market-map.md` -- per-market reconnaissance,
-  generated from the scan artifact.
-- `research/phase5-morpho-pendle-sources.md` -- provenance: repos,
-  commits, compiler versions, endpoints, and what could not be verified.
-- `models/` -- `pendle-amm.js` (a port of Pendle's `MarketMathCore`,
-  validated against 23 live oracle answers to <=3.6e-5),
+- **`test/oracle-manipulation.js`** — first pass. A directly-settable mock oracle
+  (`mocks/oracle/PriceOracle.sol`, from moola-v2 itself) shows that *if*
+  collateral price moves, borrow power moves with it 1:1. This only establishes
+  "if the oracle lies, bad things happen" — not that it *can* be made to lie
+  without a privileged call.
+- **`test/oracle-sweep.js`** — the same mock oracle swept across price
+  multipliers (1.0x–50x), with a revert-to-honest-price step that turns protocol
+  shortfall into a function of displacement rather than one anecdote.
+- **`test/amm-manipulation.js`** — closes the privileged-mock gap. Replaces the
+  settable oracle with `contracts/lab/AMMSourcedPriceOracle.sol`, which has **no
+  settable price at all**: its only source is `contracts/lab/SimpleAMMPair.sol`, a
+  real (if minimal) constant-product pool. An unprivileged actor moves the
+  lending pool's own borrow limit purely by swapping.
+- **`test/unwind-settle.js`** — the full attacker lifecycle (acquire STABLE → swap
+  into COLL → deposit as collateral → borrow → unwind swap → settle), with P&L
+  and shortfall computed against an independent $1.00 reference.
+- **`test/sweep.js`** — that lifecycle swept across AMM depth (10k/50k/200k), LTV
+  (60/70/75%) and attack capital (2k–160k), using `evm_snapshot`/`evm_revert` to
+  reuse one deployment per (liquidity, LTV) pair. Includes an *analytical*
+  flash-loan financing overlay — fee-adjusted P&L and whether the loan would be
+  repayable atomically — with no flash-loan contract in the repo.
+
+**What phases 1–4 do not establish.** This is a validated model of a
+vulnerability *class* — manipulation-resistance-free, AMM-derived collateral
+oracles in Aave-V2-shaped pools — run against mock tokens and a hand-written AMM.
+It is deliberately not a finding about any live deployment: that requires the real
+deployment's actual oracle architecture, risk parameters and market depth. Which
+is exactly what Phase 5 does.
+
+## Phase 5: Pendle PT collateral in Morpho Blue (live architecture, read-only)
+
+Different shape from the earlier phases. There is no local Solidity stack here —
+the target is live mainnet code, so Phase 5 reconstructs the **actual deployed
+oracle trees** of 66 Morpho Blue markets that use Pendle PT as collateral, across
+6 chains, and does the economics in local JavaScript models. Read-only
+throughout: `eth_call`, `eth_blockNumber` and a public GraphQL indexer.
+
+**The mechanism is real.** Morpho's `IOracle.price()` is collateral-in-loan-token
+scaled by `1e36`, and capacity is exactly linear in it — elasticity 1, with no
+buffer between the borrow check and the liquidation check, because both use the
+single market `lltv`:
+
+```
+maxBorrow = collateral * price / 1e36 * lltv
+```
+
+**The exploit still isn't reachable**, and *which* constraint stops it depends on
+maturity — that's the finding the report is organised around:
+
+```
+insolvency needs         P_displaced / P > 1/lltv    →  5.82% at lltv 94.5%
+the par ceiling allows   1/P - 1                     →  10.79% at 365d, 0.03% at 1d
+the Pendle curve allows  ~2.0%                       →  ptProportion cap ~96%,
+                                                        independent of capital
+```
+
+Near maturity `P → 1`, so the par ceiling alone ends it (`MarketMathCore` reverts
+with `MarketExchangeRateBelowOne`). Long-dated, `P` can sit *below* the LLTV with
+no credit event at all — 0.9026 at a 365d horizon on the anchor market, under both
+91.5% and 94.5% — so the par ceiling stops being a defence and Pendle's curve
+proportion cap is what actually binds. Across the 720-row stress surface
+(distortion × maturity × liquidity × LLTV × loop depth): **0 profitable attacker
+rows, 0 protocol shortfall**, and 504 of 576 non-zero displacement targets
+unreachable on the curve.
+
+**What survives.** Liquidation depth. Unwinding PT is capped by its own Pendle
+pool and the discount grows with position share — 26bp at 1% of the pool, 52bp at
+20%. At tested sizes that stays inside the liquidation incentive
+(`LIF = min(1.15, 1/(1 - 0.3*(1-lltv)))`, ~255bp of margin at 91.5% LLTV), but
+the ratio of Morpho collateral to Pendle pool depth is the thing to monitor. It's
+reported as a real discount, not as an attack.
+
+### Reading order
+
+1. [`research/phase5-morpho-pendle.md`](research/phase5-morpho-pendle.md) — the
+   main report, 20 sections. Every claim is tagged `FACT` / `INFERENCE` /
+   `HYPOTHESIS` / `UNKNOWN`; section 14 is the falsification of each hypothesis.
+2. [`research/morpho-pendle-market-map.md`](research/morpho-pendle-market-map.md)
+   — per-market reconnaissance for all 66 markets, generated from the scan.
+3. [`research/phase5-morpho-pendle-sources.md`](research/phase5-morpho-pendle-sources.md)
+   — provenance: repos, commit hashes, compiler versions, endpoints, and what
+   could **not** be verified.
+
+### Phase 5 layout
+
+- `models/` — `pendle-amm.js` (a port of Pendle's `MarketMathCore`),
   `pendle-pt-valuation.js`, `morpho-market.js`, `pt-displacement-cost.js`,
   `pt-recursive-leverage.js`, `phase5-scenarios.js`.
-- `scripts/phase5/` -- the read-only scanner, the experiment driver, and
-  the market-map renderer (`npm run phase5:scan`,
-  `npm run phase5:experiments`, `npm run phase5:market-map`).
-- `research/data/` -- generated artifacts. Regenerating the scan requires
-  network access; the experiments and the market map run offline from it.
+- `scripts/phase5/` — the read-only scanner, the experiment driver, the
+  market-map renderer.
+- `research/data/` — generated artifacts (`morpho-pt-markets.json`,
+  `phase5-results.json`, and a stress-surface CSV).
+- `test/phase5/` — 65 tests, including `falsification.js` (hypotheses A–E),
+  `regime-boundary.js` (which constraint binds where) and
+  `invariant-comparison.js` (this vs. AMM spot manipulation, donation attacks,
+  ERC-4626 inflation, stale oracles).
 
-Headline result: the hypothesis is **not supported**. Morpho does
-transmit oracle price into borrow capacity with elasticity exactly 1, but
-a PT price cannot be pushed far enough to exploit it -- near maturity
-because a PT cannot be priced above par, and long-dated because Pendle's
-96% proportion cap binds first. See section 14 for the falsification of
-each hypothesis, and section 11 for the one concern that survives
-(liquidation depth relative to the PT's own Pendle pool).
+```sh
+npm run phase5:experiments   # offline, from the committed scan artifact
+npm run phase5:market-map    # offline, regenerates the market map
+npm run phase5:scan          # the only script that needs network
+```
 
-## What each test file does
+The models use JavaScript doubles rather than Solidity fixed-point integers, so
+`models/pendle-amm.js` is **validated against live oracle answers** — max relative
+error 3.6e-5, guarded by `test/phase5/pendle-amm-port.js`. That validation is the
+load-bearing assumption under every cost number above.
 
-- `test/oracle-manipulation.js` -- first pass. Uses a directly-settable
-  mock oracle (`mocks/oracle/PriceOracle.sol`, from moola-v2 itself) to
-  show that IF collateral price can be moved, borrow power moves with
-  it 1:1. This only proves "if the oracle lies, bad things happen" --
-  it does not show the oracle *can* be made to lie without a privileged
-  call.
+### Stated limitations
 
-- `test/oracle-sweep.js` -- same mock oracle, swept across price
-  multipliers (1.0x-50x), with a revert-to-honest-price step that
-  quantifies protocol shortfall (bad debt) as a function of price
-  displacement, rather than a single hand-picked multiplier.
-
-- `test/amm-manipulation.js` -- closes the "privileged mock" gap.
-  Replaces the settable oracle with `contracts/lab/AMMSourcedPriceOracle.sol`,
-  which has NO settable price at all -- its only price source is
-  `contracts/lab/SimpleAMMPair.sol`, a real (if minimal) constant-product
-  pool. Shows an unprivileged actor moving the lending pool's own borrow
-  limit purely via an ordinary swap against a thin pool.
-
-- `test/unwind-settle.js` -- full attacker lifecycle (acquire STABLE ->
-  swap into COLL -> deposit as collateral -> borrow -> unwind swap ->
-  settle), with attacker P&L and protocol shortfall computed against an
-  INDEPENDENT reference price ($1.00), never the manipulated price --
-  otherwise the accounting can make the attacker look profitable purely
-  because the inflated price is used as both the attack mechanism and
-  the valuation basis.
-
-- `test/sweep.js` -- the same lifecycle swept across AMM liquidity depth
-  (10k/50k/200k), LTV (60/70/75%), and attack capital (2k-160k), using
-  `evm_snapshot`/`evm_revert` to reuse one deployment per (liquidity,
-  LTV) pair instead of redeploying per grid point. Also computes an
-  analytical flash-loan-financing overlay (fee-adjusted P&L, and
-  whether the flash loan would even be repayable within one
-  transaction) WITHOUT an actual flash-loan contract.
-
-## Current status / what this does NOT establish
-
-This is a validated model of a vulnerability CLASS (AMM-derived,
-manipulation-resistance-free collateral oracles in Aave-V2-shaped
-lending pools), run entirely against mock tokens and a hand-written AMM.
-It is explicitly not yet a finding about any specific live protocol --
-that would require reconstructing the real deployment's actual current
-oracle architecture (TWAP? deviation limits? SortedOracles
-aggregation?), actual current risk parameters, and actual current
-market liquidity, none of which this repo does or is intended to do.
+9 of the 66 oracle paths terminate in external feeds whose implementation could
+not be verified (their `description()` strings are quoted as self-reported, not
+confirmed). `forge`/`cast` were unavailable, so no differential fuzzing against
+Pendle's Solidity was possible. Router-specific reserve-fee overrides, off-chain
+MetaOracle keeper behaviour, cross-market correlated stress, and alternative
+liquidator venues are all unmodelled. See section 18 of the report.
 
 ## Directory guide
 
-- `contracts/protocol/`, `contracts/interfaces/`, `contracts/dependencies/`,
-  `contracts/mocks/` -- copied from moolamarket/moola-v2 (Aave V2 fork).
-- `contracts/lab/` -- written for this lab (`SimpleAMMPair.sol`,
-  `AMMSourcedPriceOracle.sol`).
-- `contracts/hardhat/console.sol` -- stub replacing the real
-  `hardhat/console.sol` import (avoids pulling in the full Hardhat
-  console dependency for one debug import in
-  `DefaultReserveInterestRateStrategy.sol`).
-- `scripts/compile.js` -- standalone solc-based compiler (see above).
-- `test/lib/deploy-stack.js` -- shared deployment helper, parameterized
-  by AMM liquidity depth and LTV.
+| Path | Origin |
+| --- | --- |
+| `contracts/protocol/`, `contracts/interfaces/`, `contracts/dependencies/`, `contracts/mocks/` | copied from moolamarket/moola-v2 (Aave V2 fork) |
+| `contracts/lab/` | written for this lab (`SimpleAMMPair.sol`, `AMMSourcedPriceOracle.sol`) |
+| `contracts/hardhat/console.sol` | stub replacing the real `hardhat/console.sol` import, for one debug import in `DefaultReserveInterestRateStrategy.sol` |
+| `scripts/compile.js` | standalone solc-based compiler (see above) |
+| `test/lib/deploy-stack.js` | shared deployment helper, parameterized by AMM depth and LTV |
+| `models/`, `scripts/phase5/`, `test/phase5/`, `research/` | Phase 5, written for this lab |
